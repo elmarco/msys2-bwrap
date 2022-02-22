@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+
+# set -x
+
+if [ -z "$XDG_CONFIG_HOME" ]; then
+  XDG_CONFIG_HOME="$HOME/.config"
+fi
+
+if [ -z "$XDG_DATA_HOME" ]; then
+  XDG_DATA_HOME="$HOME/.local/share"
+fi
+
+MSYS2_ETC="$XDG_CONFIG_HOME/msys2/etc"
+MSYS2_ROOT="$XDG_DATA_HOME/msys2"
+PACMAN_CONF="$MSYS2_ETC/pacman.conf"
+PACMAN_GNUPG="$MSYS2_ETC/pacman.d/gnupg"
+
+KEYRING=msys2-keyring-1~20211228-1-any.pkg.tar.zst
+FEDORA_MINGW32_SYSROOT="/usr/i686-w64-mingw32/sys-root/mingw"
+FEDORA_MINGW64_SYSROOT="/usr/x86_64-w64-mingw32/sys-root/mingw"
+
+function fkroot () {
+    bwrap \
+        --uid 0 --gid 0 \
+        --bind "$MSYS2_ROOT" / \
+        --ro-bind /usr /usr \
+        --bind "$MSYS2_ROOT/usr/share/pacman" /usr/share/pacman \
+        --ro-bind "$MSYS2_ETC/pacman.conf" /etc/pacman.conf \
+        --bind "$MSYS2_ETC/pacman.d" /etc/pacman.d \
+        --ro-bind /etc/resolv.conf /etc/resolv.conf \
+        --proc /proc \
+        --dev /dev \
+        --share-net \
+        -- "$@"
+}
+
+
+if [ ! -f "$PACMAN_CONF" ]; then
+  mkdir -p "$PACMAN_GNUPG"
+  mkdir -p "$MSYS2_ROOT/"{mingw32,mingw64,ucrt64,var/cache/pacman,var/lib/pacman,run,tmp,usr/share/pacman}
+  ln -sf ../tmp "$MSYS2_ROOT/var/tmp"
+  ln -sf usr/lib "$MSYS2_ROOT/lib"
+  ln -sf usr/lib64 "$MSYS2_ROOT/lib64"
+  ln -sf usr/bin "$MSYS2_ROOT/bin"
+  ln -sf usr/sbin "$MSYS2_ROOT/sbin"
+
+  curl -O "http://repo.msys2.org/msys/x86_64/$KEYRING" --output-dir "$MSYS2_ROOT"
+  curl -O "http://repo.msys2.org/msys/x86_64/$KEYRING.sig" --output-dir "$MSYS2_ROOT"
+  touch "$PACMAN_CONF"
+  #fkroot pacman-key --verify "/$KEYRING"{.sig,}
+  fkroot tar -xvpf "/$KEYRING" -C / --exclude .PKGINFO --exclude .INSTALL --exclude .MTREE --exclude .BUILDINFO
+  fkroot pacman-key --init
+  fkroot pacman-key --populate msys2
+
+  cat >"$PACMAN_CONF" <<EOF
+[options]
+#
+
+[mingw64]
+SigLevel = Required DatabaseOptional
+Server = https://repo.msys2.org/mingw/mingw64/
+
+[ucrt64]
+SigLevel = Required DatabaseOptional
+Server = https://repo.msys2.org/mingw/ucrt64/
+EOF
+fi
+
+AS_ROOT=
+while [ "$1" != "" ]; do
+    case $1 in
+        --root)
+            AS_ROOT="--uid 0 --gid 0"
+        ;;
+        pacman)
+            AS_ROOT="--uid 0 --gid 0"
+            break
+        ;;
+        *)
+            break
+    esac
+    shift
+done
+
+CMD="$@"
+if [ -z "$CMD" ]; then
+  CMD="$SHELL"
+fi
+
+(exec bwrap \
+    $AS_ROOT \
+    --bind "$MSYS2_ROOT" / \
+    --ro-bind /usr /usr \
+    --ro-bind "$MSYS2_ROOT/mingw32" "$FEDORA_MINGW32_SYSROOT" \
+    --ro-bind "$MSYS2_ROOT/mingw64" "$FEDORA_MINGW64_SYSROOT" \
+    --ro-bind "$MSYS2_ETC/pacman.conf" /etc/pacman.conf \
+    --ro-bind "$MSYS2_ETC/pacman.d" /etc/pacman.d \
+    --ro-bind /etc/pki /etc/pki \
+    --bind "$HOME" "$HOME" \
+    --proc /proc \
+    --dev /dev \
+    --ro-bind /etc/resolv.conf /etc/resolv.conf \
+    --unshare-all \
+    --share-net \
+    --die-with-parent \
+    --dir /run/user/$(id -u) \
+    --unsetenv PKG_CONFIG_PATH \
+    --setenv PKG_CONFIG_SYSROOT_DIR / \
+    --setenv XDG_RUNTIME_DIR "/run/user/`id -u`" \
+    --setenv MSYS2 1\
+    --setenv PS1 "msys2$ " \
+    --file 11 /etc/passwd \
+    --file 12 /etc/group \
+    -- $CMD) \
+    11< <(getent passwd $UID 65534) \
+    12< <(getent group $(id -g) 65534)
